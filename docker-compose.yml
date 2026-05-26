@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres-sandwich
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: Glados
+      POSTGRES_DB: Purchase
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis-sandwich
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --maxmemory 128mb --maxmemory-policy allkeys-lru
+
+volumes:
+  pgdata:
