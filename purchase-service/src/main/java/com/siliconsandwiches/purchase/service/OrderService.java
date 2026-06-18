@@ -2,72 +2,77 @@ package com.siliconsandwiches.purchase.service;
 
 import com.siliconsandwiches.purchase.dto.CreateOrderRequest;
 import com.siliconsandwiches.purchase.dto.CreateOrderResponse;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.siliconsandwiches.purchase.entity.Order;
+import com.siliconsandwiches.purchase.entity.Payment;
+import com.siliconsandwiches.purchase.repository.OrderRepository;
+import com.siliconsandwiches.purchase.repository.PaymentRepository;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.math.BigDecimal;
-import java.sql.Timestamp;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.HexFormat;
 import java.util.Optional;
-import java.util.UUID;
 
 @Service
 public class OrderService {
 
-    private final JdbcTemplate jdbc;
-    private final IdempotencyService idempotency;
+    private final OrderRepository orderRepo;
+    private final PaymentRepository paymentRepo;
 
-    public OrderService(JdbcTemplate jdbc, IdempotencyService idempotency) {
-        this.jdbc = jdbc;
-        this.idempotency = idempotency;
+    public OrderService(OrderRepository orderRepo, PaymentRepository paymentRepo) {
+        this.orderRepo = orderRepo;
+        this.paymentRepo = paymentRepo;
     }
 
     @Transactional
-    public CreateOrderResponse createOrder(String idempotencyKey, CreateOrderRequest request) {
-        // 1. Проверяем идемпотентность
-        Optional<CreateOrderResponse> cached = idempotency.getCachedResponse(idempotencyKey);
-        if (cached.isPresent()) {
-            return cached.get();
+    public CreateOrderResponse createOrder(CreateOrderRequest request) {
+        
+        String raw = request.getCustomerId() + "|" + request.getItems().toString();
+        String hash = sha256(raw);
+
+        
+        Optional<Order> existing = orderRepo.findByIdempotencyHash(hash);
+        if (existing.isPresent()) {
+            Order o = existing.get();
+            return new CreateOrderResponse(o.getId(), o.getStatus(), o.getTotal(), o.getCurrency());
         }
 
-        UUID orderId = UUID.randomUUID();
-        Timestamp now = Timestamp.from(Instant.now());
-
-        // 2. Считаем суммы
-        BigDecimal subtotal = BigDecimal.ZERO;
+       
+        BigDecimal total = BigDecimal.ZERO;
         for (var item : request.getItems()) {
-            BigDecimal itemTotal = item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
-            subtotal = subtotal.add(itemTotal);
+            total = total.add(item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity())));
         }
 
-        BigDecimal discountTotal = BigDecimal.ZERO;
-        BigDecimal total = subtotal.subtract(discountTotal);
+        
+        Order order = new Order();
+        order.setCustomerId(request.getCustomerId());
+        order.setTotal(total);
+        order.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RUB");
+        order.setIdempotencyHash(hash);
+        order.setUpdatedAt(Instant.now());
+        orderRepo.save(order);
 
-        // 3. Вставляем заказ
-        jdbc.update(
-            "INSERT INTO orders (id, customer_id, idempotency_key, status, delivery_address, " +
-            "delivery_zone, subtotal, discount_total, total, promo_code, created_at, updated_at) " +
-            "VALUES (?::uuid, ?::uuid, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?)",
-            orderId.toString(),
-            request.getCustomerId().toString(),
-            idempotencyKey,
-            request.getDeliveryAddress(),
-            request.getDeliveryZone(),
-            subtotal,
-            discountTotal,
-            total,
-            request.getPromoCode(),
-            now,
-            now
-        );
+        Payment payment = new Payment();
+        payment.setAmount(total);
+        payment.setMethod(request.getPaymentMethod() != null ? request.getPaymentMethod() : "CARD");
+        payment.setOrder(order);
+        paymentRepo.save(payment);
 
-        // 4. Формируем ответ
-        var response = new CreateOrderResponse(orderId, "NEW", subtotal, discountTotal, total);
+        order.setStatus("PAID");
+        orderRepo.save(order);
 
-        // 5. Сохраняем в Redis для идемпотентности
-        idempotency.saveResponse(idempotencyKey, response);
+        return new CreateOrderResponse(order.getId(), "PAID", total, order.getCurrency());
+    }
 
-        return response;
+    private String sha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            return HexFormat.of().formatHex(md.digest(input.getBytes(StandardCharsets.UTF_8)));
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 }

@@ -1,21 +1,7 @@
-# Maven
 target/
-!.mvn/wrapper/maven-wrapper.jar
-
-# IDE
 .idea/
 *.iml
-.vscode/
-
-# OS
 .DS_Store
-Thumbs.db
-
-# Docker
+.env
 volumes/
-
-# Логи
 *.log
-
-# Зависимости (будут скачаны при сборке)
-~/.m2/
