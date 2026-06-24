@@ -1,6 +1,6 @@
 spring:
   datasource:
-    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${PURCHASE_DB_NAME:purchase}
+    url: jdbc:postgresql://${DB_HOST:localhost}:${DB_PORT:5432}/${PROMO_DB_NAME:promotion}
     username: ${DB_USER:postgres}
     password: ${DB_PASSWORD:admin}
   jpa:
@@ -12,7 +12,6 @@ spring:
     enabled: true
     locations: classpath:db/migration
     baseline-on-migrate: true
-promotion:
-  url: http://localhost:8084/api/v1/promotions/calculate
+
 server:
-  port: 8083
+  port: 8084

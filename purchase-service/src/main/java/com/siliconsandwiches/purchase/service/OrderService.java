@@ -1,73 +1,63 @@
 package com.siliconsandwiches.purchase.service;
-
 import com.siliconsandwiches.purchase.dto.CreateOrderRequest;
 import com.siliconsandwiches.purchase.dto.CreateOrderResponse;
-import org.springframework.jdbc.core.JdbcTemplate;
+import com.siliconsandwiches.purchase.entity.Order;
+import com.siliconsandwiches.purchase.entity.Payment;
+import com.siliconsandwiches.purchase.repository.OrderRepository;
+import com.siliconsandwiches.purchase.repository.PaymentRepository;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
-
+import org.springframework.web.client.RestTemplate;
 import java.math.BigDecimal;
-import java.sql.Timestamp;
 import java.time.Instant;
+import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-
 @Service
 public class OrderService {
-
-    private final JdbcTemplate jdbc;
-    private final IdempotencyService idempotency;
-
-    public OrderService(JdbcTemplate jdbc, IdempotencyService idempotency) {
-        this.jdbc = jdbc;
-        this.idempotency = idempotency;
+    private final OrderRepository orderRepo;
+    private final PaymentRepository paymentRepo;
+    private final RestTemplate restTemplate;
+    @Value("${promotion.url}") private String promotionUrl;
+    public OrderService(OrderRepository orderRepo, PaymentRepository paymentRepo, RestTemplate restTemplate) {
+        this.orderRepo = orderRepo; this.paymentRepo = paymentRepo; this.restTemplate = restTemplate;
     }
-
     @Transactional
-    public CreateOrderResponse createOrder(String idempotencyKey, CreateOrderRequest request) {
-        // 1. Проверяем идемпотентность
-        Optional<CreateOrderResponse> cached = idempotency.getCachedResponse(idempotencyKey);
-        if (cached.isPresent()) {
-            return cached.get();
+    public CreateOrderResponse createOrder(CreateOrderRequest request) {
+        UUID idempotencyKey = UUID.randomUUID();
+        Optional<Payment> existing = paymentRepo.findByIdempotencyKey(idempotencyKey);
+        if (existing.isPresent()) {
+            Order o = existing.get().getOrder();
+            return new CreateOrderResponse(o.getId(), o.getStatus(), o.getTotal(), o.getCurrency());
         }
-
-        UUID orderId = UUID.randomUUID();
-        Timestamp now = Timestamp.from(Instant.now());
-
-        // 2. Считаем суммы
-        BigDecimal subtotal = BigDecimal.ZERO;
+        BigDecimal total = BigDecimal.ZERO;
         for (var item : request.getItems()) {
-            BigDecimal itemTotal = item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity()));
-            subtotal = subtotal.add(itemTotal);
+            total = total.add(item.getUnitPrice().multiply(BigDecimal.valueOf(item.getQuantity())));
         }
-
-        BigDecimal discountTotal = BigDecimal.ZERO;
-        BigDecimal total = subtotal.subtract(discountTotal);
-
-        // 3. Вставляем заказ
-        jdbc.update(
-            "INSERT INTO orders (id, customer_id, idempotency_key, status, delivery_address, " +
-            "delivery_zone, subtotal, discount_total, total, promo_code, created_at, updated_at) " +
-            "VALUES (?::uuid, ?::uuid, ?, 'NEW', ?, ?, ?, ?, ?, ?, ?, ?)",
-            orderId.toString(),
-            request.getCustomerId().toString(),
-            idempotencyKey,
-            request.getDeliveryAddress(),
-            request.getDeliveryZone(),
-            subtotal,
-            discountTotal,
-            total,
-            request.getPromoCode(),
-            now,
-            now
-        );
-
-        // 4. Формируем ответ
-        var response = new CreateOrderResponse(orderId, "NEW", subtotal, discountTotal, total);
-
-        // 5. Сохраняем в Redis для идемпотентности
-        idempotency.saveResponse(idempotencyKey, response);
-
-        return response;
+        if (request.getPromoCode() != null && !request.getPromoCode().isBlank()) {
+            try {
+                var promoResponse = restTemplate.postForObject(promotionUrl,
+                    Map.of("promoCode", request.getPromoCode(), "subtotal", total, "customerId", request.getCustomerId()), Map.class);
+                if (promoResponse != null && promoResponse.get("discount") != null) {
+                    total = total.subtract(new BigDecimal(promoResponse.get("discount").toString()));
+                }
+            } catch (Exception e) {}
+        }
+        Order order = new Order();
+        order.setCustomerId(request.getCustomerId());
+        order.setTotal(total);
+        order.setCurrency(request.getCurrency() != null ? request.getCurrency() : "RUB");
+        order.setUpdatedAt(Instant.now());
+        orderRepo.save(order);
+        Payment payment = new Payment();
+        payment.setAmount(total);
+        payment.setMethod(request.getPaymentMethod() != null ? request.getPaymentMethod() : "CARD");
+        payment.setIdempotencyKey(idempotencyKey);
+        payment.setOrder(order);
+        paymentRepo.save(payment);
+        order.setStatus("PAID");
+        orderRepo.save(order);
+        return new CreateOrderResponse(order.getId(), "PAID", total, order.getCurrency());
     }
 }
